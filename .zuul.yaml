@@ -3,3 +3,4 @@
     check-telefonica:
       jobs:
         - terraform-provider-telefonicaopencloud-acceptance-test-telefonica
+#
