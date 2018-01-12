@@ -10,6 +10,7 @@ import (
 	"github.com/gophercloud/gophercloud/openstack/autoscaling/v1/configurations"
 	"github.com/gophercloud/gophercloud/openstack/autoscaling/v1/groups"
 	"github.com/hashicorp/terraform/helper/schema"
+	"os"
 	"regexp"
 )
 
@@ -47,6 +48,7 @@ func resourceASConfiguration() *schema.Resource {
 						"flavor": &schema.Schema{
 							Type:     schema.TypeString,
 							Optional: true,
+							Default:  getDefaultFlavor(),
 						},
 						"image": &schema.Schema{
 							Type:     schema.TypeString,
@@ -168,6 +170,16 @@ func resourceASConfiguration() *schema.Resource {
 	}
 }
 
+func getDefaultFlavor() string {
+	flavorId := os.Getenv("OS_FLAVOR_ID")
+
+	if flavorId != "" {
+		return flavorId
+	}
+
+	flavorName := os.Getenv("OS_FLAVOR_NAME")
+	return flavorName
+}
 func getDisk(diskMeta []interface{}) ([]configurations.DiskOpts, error) {
 	var diskOptsList []configurations.DiskOpts
 
@@ -341,12 +353,16 @@ func resourceASConfigurationDelete(d *schema.ResourceData, meta interface{}) err
 }
 
 func getASGroupsByConfiguration(asClient *gophercloud.ServiceClient, configurationID string) ([]groups.Group, error) {
+	var gs []groups.Group
 	listOpts := groups.ListOpts{
 		ConfigurationID: configurationID,
 	}
-	page, _ := groups.List(asClient, listOpts).AllPages()
-	groups, err := page.(groups.GroupPage).Extract()
-	return groups, err
+	page, err := groups.List(asClient, listOpts).AllPages()
+	if err != nil {
+		return gs, fmt.Errorf("Error getting ASGroups by configuration %q: %s", configurationID, err)
+	}
+	gs, err = page.(groups.GroupPage).Extract()
+	return gs, err
 }
 
 var BandWidthChargeMode = [1]string{"traffic"}

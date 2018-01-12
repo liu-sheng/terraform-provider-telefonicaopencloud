@@ -21,6 +21,11 @@ func resourceASGroup() *schema.Resource {
 		Update: resourceASGroupUpdate,
 		Delete: resourceASGroupDelete,
 
+		Timeouts: &schema.ResourceTimeout{
+			Create: schema.DefaultTimeout(10 * time.Minute),
+			Delete: schema.DefaultTimeout(10 * time.Minute),
+		},
+
 		Schema: map[string]*schema.Schema{
 			"region": &schema.Schema{
 				Type:     schema.TypeString,
@@ -250,9 +255,13 @@ func getAllSecurityGroups(d *schema.ResourceData, meta interface{}) []Group {
 }
 
 func getInstancesInGroup(asClient *gophercloud.ServiceClient, groupID string, opts instances.ListOptsBuilder) ([]instances.Instance, error) {
-	page, _ := instances.List(asClient, groupID, opts).AllPages()
-	instances, err := page.(instances.InstancePage).Extract()
-	return instances, err
+	var insList []instances.Instance
+	page, err := instances.List(asClient, groupID, opts).AllPages()
+	if err != nil {
+		return insList, fmt.Errorf("Error getting instances in ASGroup %q: %s", groupID, err)
+	}
+	insList, err = page.(instances.InstancePage).Extract()
+	return insList, err
 }
 func getInstancesIDs(allIns []instances.Instance) []string {
 	var allIDs []string
@@ -284,8 +293,9 @@ func refreshInstancesLifeStates(asClient *gophercloud.ServiceClient, groupID str
 		if err != nil {
 			return nil, "ERROR", err
 		}
+		// maybe the instances (or some of the instances) have not put in the asg when creating
 		if checkInService && len(allIns) != insNum {
-			return allIns, "ERROR", fmt.Errorf("Error refreshing instance lifestatus for group %q, there is no instance in the group.", groupID)
+			return allIns, "PENDING", err
 		}
 		allLifeStatus := getInstancesLifeStates(allIns)
 		for _, lifeStatus := range allLifeStatus {
@@ -311,12 +321,12 @@ func refreshInstancesLifeStates(asClient *gophercloud.ServiceClient, groupID str
 	}
 }
 
-func checkASGroupInstancesInService(asClient *gophercloud.ServiceClient, groupID string, insNum int) error {
+func checkASGroupInstancesInService(asClient *gophercloud.ServiceClient, groupID string, insNum int, timeout time.Duration) error {
 	stateConf := &resource.StateChangeConf{
 		Pending: []string{"PENDING"},
 		Target:  []string{"INSERVICE"}, //if there is no lifecyclestatus, meaning no instances in asg
 		Refresh: refreshInstancesLifeStates(asClient, groupID, insNum, true),
-		Timeout: 600 * time.Second,
+		Timeout: timeout,
 		Delay:   10 * time.Second,
 	}
 
@@ -325,12 +335,12 @@ func checkASGroupInstancesInService(asClient *gophercloud.ServiceClient, groupID
 	return err
 }
 
-func checkASGroupInstancesRemoved(asClient *gophercloud.ServiceClient, groupID string) error {
+func checkASGroupInstancesRemoved(asClient *gophercloud.ServiceClient, groupID string, timeout time.Duration) error {
 	stateConf := &resource.StateChangeConf{
 		Pending: []string{"REMOVING"},
 		Target:  []string{""}, //if there is no lifecyclestatus, meaning no instances in asg
 		Refresh: refreshInstancesLifeStates(asClient, groupID, 0, false),
-		Timeout: 300 * time.Second,
+		Timeout: timeout,
 		Delay:   10 * time.Second,
 	}
 
@@ -405,9 +415,10 @@ func resourceASGroupCreate(d *schema.ResourceData, meta interface{}) error {
 	log.Printf("[DEBUG] Enable ASGroup %q success!", asgId)
 	// check all instances are inservice
 	if initNum > 0 {
-		err = checkASGroupInstancesInService(asClient, asgId, initNum)
+		timeout := d.Timeout(schema.TimeoutCreate)
+		err = checkASGroupInstancesInService(asClient, asgId, initNum, timeout)
 		if err != nil {
-			return fmt.Errorf("Maybe the instances in ASGroup %q are not inservice!!: %s", asgId, err)
+			return fmt.Errorf("Error waiting for instances in the ASGroup %q to become inservice!!: %s", asgId, err)
 		}
 	}
 
@@ -544,7 +555,8 @@ func resourceASGroupDelete(d *schema.ResourceData, meta interface{}) error {
 			return fmt.Errorf("Error removing instancess of asg: %s", batchResult.Err)
 		}
 		log.Printf("[DEBUG] Begin to remove instances of ASGroup %q", d.Id())
-		err = checkASGroupInstancesRemoved(asClient, d.Id())
+		timeout := d.Timeout(schema.TimeoutDelete)
+		err = checkASGroupInstancesRemoved(asClient, d.Id(), timeout)
 		if err != nil {
 			return fmt.Errorf(
 				"[DEBUG] Error removing instances from ASGroup %q: %s", d.Id(), err)
